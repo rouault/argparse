@@ -58,6 +58,18 @@ SOFTWARE.
 #include <vector>
 #endif
 
+#ifndef ARGPARSE_CUSTOM_STRTOF
+#define ARGPARSE_CUSTOM_STRTOF strtof
+#endif
+
+#ifndef ARGPARSE_CUSTOM_STRTOD
+#define ARGPARSE_CUSTOM_STRTOD strtod
+#endif
+
+#ifndef ARGPARSE_CUSTOM_STRTOLD
+#define ARGPARSE_CUSTOM_STRTOLD strtold
+#endif
+
 namespace argparse {
 
 namespace details { // namespace for helper methods
@@ -347,9 +359,10 @@ template <class T> struct parse_number<T> {
 namespace {
 
 template <class T> inline const auto generic_strtod = nullptr;
-template <> inline const auto generic_strtod<float> = strtof;
-template <> inline const auto generic_strtod<double> = strtod;
-template <> inline const auto generic_strtod<long double> = strtold;
+template <> inline const auto generic_strtod<float> = ARGPARSE_CUSTOM_STRTOF;
+template <> inline const auto generic_strtod<double> = ARGPARSE_CUSTOM_STRTOD;
+template <>
+inline const auto generic_strtod<long double> = ARGPARSE_CUSTOM_STRTOLD;
 
 } // namespace
 
@@ -545,10 +558,9 @@ std::size_t get_levenshtein_distance(const StringType &s1,
 }
 
 template <typename ValueType>
-std::string_view
-get_most_similar_string(const std::map<std::string_view, ValueType> &map,
-                        const std::string_view input) {
-  std::string_view most_similar{};
+std::string get_most_similar_string(const std::map<std::string, ValueType> &map,
+                                    const std::string &input) {
+  std::string most_similar{};
   std::size_t min_distance = std::numeric_limits<std::size_t>::max();
 
   for (const auto &entry : map) {
@@ -674,6 +686,57 @@ public:
             return details::apply_plus_one(f, tup, opt);
           });
     }
+    return *this;
+  }
+
+  auto &store_into(bool &var) {
+    flag();
+    if (m_default_value.has_value()) {
+      var = std::any_cast<bool>(m_default_value);
+    }
+    action([&var](const auto & /*unused*/) { var = true; });
+    return *this;
+  }
+
+  auto &store_into(int &var) {
+    if (m_default_value.has_value()) {
+      var = std::any_cast<int>(m_default_value);
+    }
+    action([&var](const auto &s) {
+      var = details::parse_number<int, details::radix_10>()(s);
+    });
+    return *this;
+  }
+
+  auto &store_into(double &var) {
+    if (m_default_value.has_value()) {
+      var = std::any_cast<double>(m_default_value);
+    }
+    action([&var](const auto &s) {
+      var = details::parse_number<double, details::chars_format::general>()(s);
+    });
+    return *this;
+  }
+
+  auto &store_into(std::string &var) {
+    if (m_default_value.has_value()) {
+      var = std::any_cast<std::string>(m_default_value);
+    }
+    action([&var](const std::string &s) { var = s; });
+    return *this;
+  }
+
+  auto &store_into(std::vector<std::string> &var) {
+    if (m_default_value.has_value()) {
+      var = std::any_cast<std::vector<std::string>>(m_default_value);
+    }
+    action([this, &var](const std::string &s) {
+      if (!m_is_used) {
+        var.clear();
+      }
+      m_is_used = true;
+      var.push_back(s);
+    });
     return *this;
   }
 
@@ -834,13 +897,17 @@ public:
     }
   }
 
+  /* The dry_run parameter can be set to true to avoid running the actions,
+   * and setting m_is_used. This may be used by a pre-processing step to do
+   * a first iteration over arguments.
+   */
   template <typename Iterator>
   Iterator consume(Iterator start, Iterator end,
-                   std::string_view used_name = {}) {
+                   std::string_view used_name = {}, bool dry_run = false) {
     if (!m_is_repeatable && m_is_used) {
-      throw std::runtime_error("Duplicate argument");
+      throw std::runtime_error(
+          std::string("Duplicate argument ").append(used_name));
     }
-    m_is_used = true;
     m_used_name = used_name;
 
     if (m_choices.has_value()) {
@@ -861,8 +928,11 @@ public:
     const auto num_args_min = m_num_args_range.get_min();
     std::size_t dist = 0;
     if (num_args_max == 0) {
-      m_values.emplace_back(m_implicit_value);
-      std::visit([](const auto &f) { f({}); }, m_action);
+      if (!dry_run) {
+        m_values.emplace_back(m_implicit_value);
+        std::visit([](const auto &f) { f({}); }, m_action);
+        m_is_used = true;
+      }
       return start;
     }
     if ((dist = static_cast<std::size_t>(std::distance(start, end))) >=
@@ -899,10 +969,16 @@ public:
         Iterator first, last;
         Argument &self;
       };
-      std::visit(ActionApply{start, end, *this}, m_action);
+      if (!dry_run) {
+        std::visit(ActionApply{start, end, *this}, m_action);
+        m_is_used = true;
+      }
       return end;
     }
     if (m_default_value.has_value()) {
+      if (!dry_run) {
+        m_is_used = true;
+      }
       return start;
     }
     throw std::runtime_error("Too few arguments for '" +
@@ -1095,6 +1171,31 @@ public:
                           return std::any_cast<const ValueType &>(a) == b;
                         });
     }
+  }
+
+  /*
+   * positional:
+   *    _empty_
+   *    '-'
+   *    '-' decimal-literal
+   *    !'-' anything
+   */
+  static bool is_positional(std::string_view name,
+                            std::string_view prefix_chars) {
+    auto first = lookahead(name);
+
+    if (first == eof) {
+      return true;
+    }
+    if (prefix_chars.find(static_cast<char>(first)) !=
+                          std::string_view::npos) {
+      name.remove_prefix(1);
+      if (name.empty()) {
+        return true;
+      }
+      return is_decimal_literal(name);
+    }
+    return true;
   }
 
 private:
@@ -1333,30 +1434,6 @@ private:
   }
 
   /*
-   * positional:
-   *    _empty_
-   *    '-'
-   *    '-' decimal-literal
-   *    !'-' anything
-   */
-  static bool is_positional(std::string_view name,
-                            std::string_view prefix_chars) {
-    auto first = lookahead(name);
-
-    if (first == eof) {
-      return true;
-    } else if (prefix_chars.find(static_cast<char>(first)) !=
-               std::string_view::npos) {
-      name.remove_prefix(1);
-      if (name.empty()) {
-        return true;
-      }
-      return is_decimal_literal(name);
-    }
-    return true;
-  }
-
-  /*
    * Get argument value given a type
    * @throws std::logic_error in case of incompatible types
    */
@@ -1579,6 +1656,21 @@ public:
     return *this;
   }
 
+  // Add a un-documented/hidden alias for an argument.
+  // Ideally we'd want this to be a method of Argument, but Argument
+  // does not own its owing ArgumentParser.
+  ArgumentParser &add_hidden_alias_for(Argument &arg, std::string_view alias) {
+    for (auto it = m_optional_arguments.begin();
+         it != m_optional_arguments.end(); ++it) {
+      if (&(*it) == &arg) {
+        m_argument_map.insert_or_assign(std::string(alias), it);
+        return *this;
+      }
+    }
+    throw std::logic_error(
+        "Argument is not an optional argument of this parser");
+  }
+
   /* Getter for arguments and subparsers.
    * @throws std::logic_error in case of an invalid argument or subparser name
    */
@@ -1586,11 +1678,12 @@ public:
     if constexpr (std::is_same_v<T, Argument>) {
       return (*this)[name];
     } else {
-      auto subparser_it = m_subparser_map.find(name);
+      std::string str_name(name);
+      auto subparser_it = m_subparser_map.find(str_name);
       if (subparser_it != m_subparser_map.end()) {
         return subparser_it->second->get();
       }
-      throw std::logic_error("No such subparser: " + std::string(name));
+      throw std::logic_error("No such subparser: " + str_name);
     }
   }
 
@@ -1720,7 +1813,7 @@ public:
   /* Getter that returns true if a subcommand is used.
    */
   auto is_subcommand_used(std::string_view subcommand_name) const {
-    return m_subparser_used.at(subcommand_name);
+    return m_subparser_used.at(std::string(subcommand_name));
   }
 
   /* Getter that returns true if a subcommand is used.
@@ -1734,12 +1827,12 @@ public:
    * @throws std::logic_error in case of an invalid argument name
    */
   Argument &operator[](std::string_view arg_name) const {
-    auto it = m_argument_map.find(arg_name);
+    std::string name(arg_name);
+    auto it = m_argument_map.find(name);
     if (it != m_argument_map.end()) {
       return *(it->second);
     }
     if (!is_valid_prefix_char(arg_name.front())) {
-      std::string name(arg_name);
       const auto legal_prefix_char = get_any_valid_prefix_char();
       const auto prefix = std::string(1, legal_prefix_char);
 
@@ -1885,7 +1978,7 @@ public:
 
   void set_suppress(bool suppress) { m_suppress = suppress; }
 
-private:
+protected:
   bool is_valid_prefix_char(char c) const {
     return m_prefix_chars.find(c) != std::string::npos;
   }
@@ -1972,10 +2065,8 @@ private:
       if (Argument::is_positional(current_argument, m_prefix_chars)) {
         if (positional_argument_it == std::end(m_positional_arguments)) {
 
-          std::string_view maybe_command = current_argument;
-
           // Check sub-parsers
-          auto subparser_it = m_subparser_map.find(maybe_command);
+          auto subparser_it = m_subparser_map.find(current_argument);
           if (subparser_it != m_subparser_map.end()) {
 
             // build list of remaining args
@@ -1984,7 +2075,7 @@ private:
 
             // invoke subparser
             m_is_parsed = true;
-            m_subparser_used[maybe_command] = true;
+            m_subparser_used[current_argument] = true;
             return subparser_it->second->get().parse_args(
                 unprocessed_arguments);
           }
@@ -2075,10 +2166,8 @@ private:
       if (Argument::is_positional(current_argument, m_prefix_chars)) {
         if (positional_argument_it == std::end(m_positional_arguments)) {
 
-          std::string_view maybe_command = current_argument;
-
           // Check sub-parsers
-          auto subparser_it = m_subparser_map.find(maybe_command);
+          auto subparser_it = m_subparser_map.find(current_argument);
           if (subparser_it != m_subparser_map.end()) {
 
             // build list of remaining args
@@ -2087,7 +2176,7 @@ private:
 
             // invoke subparser
             m_is_parsed = true;
-            m_subparser_used[maybe_command] = true;
+            m_subparser_used[current_argument] = true;
             return subparser_it->second->get().parse_known_args_internal(
                 unprocessed_arguments);
           }
@@ -2172,11 +2261,11 @@ private:
   bool m_is_parsed = false;
   std::list<Argument> m_positional_arguments;
   std::list<Argument> m_optional_arguments;
-  std::map<std::string_view, argument_it> m_argument_map;
+  std::map<std::string, argument_it> m_argument_map;
   std::string m_parser_path;
   std::list<std::reference_wrapper<ArgumentParser>> m_subparsers;
-  std::map<std::string_view, argument_parser_it> m_subparser_map;
-  std::map<std::string_view, bool> m_subparser_used;
+  std::map<std::string, argument_parser_it> m_subparser_map;
+  std::map<std::string, bool> m_subparser_used;
   std::vector<MutuallyExclusiveGroup> m_mutually_exclusive_groups;
   bool m_suppress = false;
 };
