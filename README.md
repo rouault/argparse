@@ -26,6 +26,7 @@
           *    [Joining values of repeated optional arguments](#joining-values-of-repeated-optional-arguments)
           *    [Repeating an argument to increase a value](#repeating-an-argument-to-increase-a-value)
           *    [Mutually Exclusive Group](#mutually-exclusive-group)
+     *    [Storing values into variables](#store-into)
      *    [Negative Numbers](#negative-numbers)
      *    [Combining Positional and Optional Arguments](#combining-positional-and-optional-arguments)
      *    [Printing Help](#printing-help)
@@ -38,6 +39,7 @@
      *    [Parent Parsers](#parent-parsers)
      *    [Subcommands](#subcommands)
      *    [Parse Known Args](#parse-known-args)
+     *    [Hidden argument and alias](#hidden-argument-alias)
      *    [ArgumentParser in bool Context](#argumentparser-in-bool-context)
      *    [Custom Prefix Characters](#custom-prefix-characters)
      *    [Custom Assignment Characters](#custom-assignment-characters)
@@ -46,6 +48,7 @@
      *    [Positional Arguments with Compound Toggle Arguments](#positional-arguments-with-compound-toggle-arguments)
      *    [Restricting the set of values for an argument](#restricting-the-set-of-values-for-an-argument)
      *    [Using `option=value` syntax](#using-optionvalue-syntax)
+     *    [Advanced usage formatting](#advanced-usage-formatting)
 *    [Developer Notes](#developer-notes)
      *    [Copying and Moving](#copying-and-moving)
 *    [CMake Integration](#cmake-integration)
@@ -313,6 +316,36 @@ with the following usage will yield an error:
 ```console
 foo@bar:/home/dev/$ ./main
 One of the arguments '--first VAR' or '--second VAR' is required
+```
+
+### Storing values into variables
+
+It is possible to bind arguments to a variable storing their value, as an
+alternative to explicitly calling ``program.get<T>(arg_name)`` or ``program[arg_name]``
+
+This is currently implementeted for variables of type ``bool`` (this also
+implicitly calls ``flag()``), ``int``, ``double``, ``std::string`` and
+``std::vector<std::string>``. If the argument is not specified in the command
+line, the default value (if set) is set into the variable.
+
+```cpp
+bool flagvar = false;
+program.add_argument("--flagvar").store_into(flagvar);
+
+int intvar = 0;
+program.add_argument("--intvar").store_into(intvar);
+
+double doublevar = 0;
+program.add_argument("--doublevar").store_into(doublevar);
+
+std::string strvar;
+program.add_argument("--strvar").store_into(strvar);
+
+std::vector<std::string> strvar_repeated;
+program.add_argument("--strvar-repeated").append().store_into(strvar_repeated);
+
+std::vector<std::string> strvar_multi_valued;
+program.add_argument("--strvar-multi-valued").nargs(2).store_into(strvar_multi_valued);
 ```
 
 ### Negative Numbers
@@ -970,6 +1003,32 @@ int main(int argc, char *argv[]) {
 }
 ```
 
+### Hidden argument and alias
+
+It is sometimes desirable to offer an alias for an argument, but without it
+appearing it in the usage. For example, to phase out a deprecated wording of
+an argument while not breaking backwards compatible. This can be done with
+the ``ArgumentParser::add_hidden_alias_for()` method.
+
+```cpp
+argparse::ArgumentParser program("test");
+
+auto &arg = program.add_argument("--suppress").flag();
+program.add_hidden_alias_for(arg, "--supress"); // old misspelled alias
+```
+
+The ``Argument::hidden()`` method can also be used to prevent a (generally
+optional) argument from appearing in the usage or help.
+
+```cpp
+argparse::ArgumentParser program("test");
+
+program.add_argument("--non-documented").flag().hidden();
+```
+
+This can also be used on positional arguments, but in that later case it only
+makes sense in practice for the last ones.
+
 ### ArgumentParser in bool Context
 
 An `ArgumentParser` is `false` until it (or one of its subparsers) have extracted
@@ -1234,6 +1293,68 @@ int main(int argc, char *argv[]) {
 foo@bar:/home/dev/$ ./test --bar=BAR --foo
 --foo: true
 --bar: BAR
+```
+
+### Advanced usage formatting
+
+By default usage is reported on a single line.
+
+The ``ArgumentParser::set_usage_max_line_width(width)`` method can be used
+to display the usage() on multiple lines, by defining the maximum line width.
+
+It can be combined with a call to ``ArgumentParser::set_usage_break_on_mutex()``
+to ask grouped mutually exclusive arguments to be displayed on a separate line.
+
+``ArgumentParser::add_usage_newline()`` can also be used to force the next
+argument to be displayed on a new line in the usage output.
+
+The following snippet
+
+```cpp
+    argparse::ArgumentParser program("program");
+    program.set_usage_max_line_width(80);
+    program.set_usage_break_on_mutex();
+    program.add_argument("--quite-long-option-name").flag();
+    auto &group = program.add_mutually_exclusive_group();
+    group.add_argument("-a").flag();
+    group.add_argument("-b").flag();
+    program.add_argument("-c").flag();
+    program.add_argument("--another-one").flag();
+    program.add_argument("-d").flag();
+    program.add_argument("--yet-another-long-one").flag();
+    program.add_argument("--will-go-on-new-line").flag();
+    program.add_usage_newline();
+    program.add_argument("--new-line").flag();
+    std::cout << program.usage() << std::endl;
+```
+
+will display:
+```console
+Usage: program [--help] [--version] [--quite-long-option-name]
+               [[-a]|[-b]]
+               [-c] [--another-one] [-d] [--yet-another-long-one]
+               [--will-go-on-new-line]
+               [--new-line]
+```
+
+Furthermore arguments can be separated into several groups by calling
+``ArgumentParser::add_group(group_name)``. Only optional arguments should
+be specified after the first call to add_group().
+
+```cpp
+    argparse::ArgumentParser program("program");
+    program.set_usage_max_line_width(80);
+    program.add_argument("-a").flag().help("help_a");
+    program.add_group("Advanced options");
+    program.add_argument("-b").flag().help("help_b");
+```
+
+will display:
+```console
+Usage: program [--help] [--version] [-a]
+
+Advanced options:
+               [-b]
 ```
 
 ## Developer Notes
